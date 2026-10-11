@@ -141,19 +141,19 @@ pub fn main(init: std.process.Init) !void {
                 return help(io);
             } else if (std.mem.eql(u8, arg, "--latest")) {
                 latest = true;
-            } else if (std.mem.eql(u8, arg, "--wait")) {
+            } else if (std.mem.eql(u8, arg, "--wait-lines")) {
                 wait_lines = 1;
                 // Only consume a positive integer. A non-number is the session.
                 // A numeric zero or overflow is rejected rather than a session.
                 const next = args.next() orelse break;
                 if (next.len > 0 and std.ascii.isDigit(next[0])) {
-                    const n = std.fmt.parseInt(u32, next, 10) catch return printError(io, "invalid --wait line count: {s}", .{next});
-                    if (n == 0) return printError(io, "--wait requires N >= 1", .{});
+                    const n = std.fmt.parseInt(u32, next, 10) catch return printError(io, "invalid --wait-lines line count: {s}", .{next});
+                    if (n == 0) return printError(io, "--wait-lines requires N >= 1", .{});
                     wait_lines = n;
                 } else if (std.mem.startsWith(u8, next, "--")) {
                     pending_arg = next;
                 } else if (std.mem.startsWith(u8, next, "-")) {
-                    return printError(io, "invalid --wait line count: {s}", .{next});
+                    return printError(io, "invalid --wait-lines line count: {s}", .{next});
                 } else if (session_name == null) {
                     session_name = next;
                 } else return printError(io, "unexpected argument: {s}", .{next});
@@ -179,8 +179,8 @@ pub fn main(init: std.process.Init) !void {
                 session_name = arg;
             } else return printError(io, "unexpected argument: {s}", .{arg});
         }
-        if (!latest and wait_lines != null) return printError(io, "--wait requires --latest", .{});
-        if (has_timeout and (wait_lines == null or !latest)) return printError(io, "--timeout requires --latest --wait", .{});
+        if (!latest and wait_lines != null) return printError(io, "--wait-lines requires --latest", .{});
+        if (has_timeout and (wait_lines == null or !latest)) return printError(io, "--timeout requires --latest --wait-lines", .{});
         if (latest and (format != .plain or scrollback_rows != null)) return printError(io, "--latest is incompatible with --vt, --html, --screen and --scrollback", .{});
         const sesh_env = socket.getSeshNameFromEnv();
         const raw_name = session_name orelse (if (sesh_env.len > 0) sesh_env else {
@@ -566,7 +566,7 @@ fn help(io: std.Io) !void {
         \\  print-env [-s] <name> [key]                                Print tracked environment variables
         \\  [k]ill <name>... [--force]                                 Kill session and all attached clients
         \\  [hi]story <name> [--vt|--html] [--screen|--scrollback]     Output session scrollback
-        \\  history --latest [--wait [N] [--timeout X]] <name>        Incremental plain history
+        \\  history --latest [--wait-lines [N] [--timeout X]] <name>  Incremental plain history
         \\  [w]ait <name>...                                           Wait for session tasks to complete
         \\  [t]ail <name>...                                           Follow session output
         \\  [c]ompletions <shell>                                      Shell completions (bash, zsh, fish, nu, yash)
@@ -597,8 +597,10 @@ fn help(io: std.Io) !void {
         \\  --latest uses one session-wide cursor (intended for one consumer).
         \\  First call returns up to 20 existing lines; later calls return only
         \\  newly completed primary-screen lines. Alternate-screen output is
-        \\  not tracked. --wait [N] waits for N lines (default 1) and
-        \\  --timeout X limits the wait to X seconds (default 5).
+        \\  not tracked. While alternate screen is active, --latest returns
+        \\  a notice suggesting plain history for a non-incremental snapshot.
+        \\  --wait-lines [N] waits for N lines (default 1) and --timeout X
+        \\  limits the wait to X seconds (default 5).
         \\
         \\  Examples:
         \\    zmx history <session> | tail -100

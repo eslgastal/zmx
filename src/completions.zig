@@ -49,7 +49,7 @@ const bash_completions =
     \\      ;;
     \\    history)
     \\      local sessions=$(zmx list --short 2>/dev/null | tr '\n' ' ')
-    \\      COMPREPLY=($(compgen -W "--screen --scrollback --vt --html --latest --wait --timeout $sessions" -- "$cur"))
+    \\      COMPREPLY=($(compgen -W "--screen --scrollback --vt --html --latest --wait-lines --timeout $sessions" -- "$cur"))
     \\      ;;
     \\    completions)
     \\      COMPREPLY=($(compgen -W "bash zsh fish nu yash" -- "$cur"))
@@ -109,7 +109,7 @@ const zsh_completions =
     \\          ;;
     \\        history|hi)
     \\          _zmx_sessions
-    \\          _values 'options' '--screen' '--scrollback' '--vt' '--html' '--latest' '--wait' '--timeout'
+    \\          _values 'options' '--screen' '--scrollback' '--vt' '--html' '--latest' '--wait-lines' '--timeout'
     \\          ;;
     \\        completions|c)
     \\          _values 'shell' 'bash' 'zsh' 'fish' 'nu' 'yash'
@@ -183,7 +183,7 @@ const fish_completions =
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l screen -d 'Output only the active screen'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l scrollback -d 'Rows of scrollback to add above the screen' -r
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l latest -d 'Incremental primary-screen history'
-    \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l wait -d 'Wait for completed lines (optional N)'
+    \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l wait-lines -d 'Wait for completed lines (optional N)'
     \\complete -c zmx -n "__fish_seen_subcommand_from hi history" -l timeout -d 'Wait limit in seconds' -r
     \\complete -c zmx -n "__fish_seen_subcommand_from print-env" -s s -l shell -d 'Output POSIX export/unset commands for eval'
 ;
@@ -232,7 +232,7 @@ const nu_completions =
     \\
     \\export extern "zmx detach" []
     \\export extern "zmx list" [--short]
-    \\export extern "zmx history" [name: string@"nu-complete zmx sessions", --vt, --html, --screen, --scrollback: int, --latest, --wait, --timeout: int, ...rest: string]
+    \\export extern "zmx history" [name: string@"nu-complete zmx sessions", --vt, --html, --screen, --scrollback: int, --latest, --wait-lines, --timeout: int, ...rest: string]
     \\export extern "zmx wait" [...sessions: string@"nu-complete zmx sessions"]
     \\export extern "zmx tail" [...sessions: string@"nu-complete zmx sessions"]
     \\export extern "zmx version" []
@@ -505,7 +505,7 @@ const yash_completions =
     \\        "--screen; active screen only"
     \\        "--scrollback:; rows above screen"
     \\        "--latest; incremental primary-screen history"
-    \\        "--wait; wait for new lines (optional N)"
+    \\        "--wait-lines; wait for new lines (optional N)"
     \\        "--timeout:; wait limit in seconds"
     \\    ) #<#
     \\    command -f completion//parseoptions -en

@@ -22,7 +22,7 @@
 - Re-attaching to a session restores previous terminal state and output
 - Send commands to a session without attaching to it
 - Print scrollback history of a terminal session in plain text
-- Poll incremental primary-screen history with `zmx history --latest SESSION` (first call shows up to the last 20 lines, subsequent calls consume newly completed lines). `--wait [N]` waits for at least N lines (default 1); `--timeout X` limits waiting to X seconds (default 5). The cursor is session-wide, intended for one consumer. Alternate-screen output is not tracked. At most 1 MiB of unconsumed lines is kept; oldest lines (and logical lines exceeding 256 wrapped rows) are dropped with an explicit notice on the next read.
+- Poll incremental primary-screen history with `zmx history --latest SESSION` (first call shows up to the last 20 lines, subsequent calls consume newly completed lines). `--wait-lines [N]` waits for at least N lines (default 1); `--timeout X` limits waiting to X seconds (default 5). The cursor is session-wide, intended for one consumer. Alternate-screen output is not tracked: while it is active, `--latest` returns a notice (plus any queued primary-screen lines) suggesting ordinary `zmx history SESSION` for a non-incremental snapshot. A first call in the alternate screen defers initialization until the primary screen returns. At most 1 MiB of unconsumed lines is kept; oldest lines (and logical lines exceeding 256 wrapped rows) are dropped with an explicit notice on the next read.
 - Works on mac and linux
 - This project does **NOT** provide windows, tabs, or splits
 
@@ -115,7 +115,7 @@ Commands:
   print-env [-s] <name> [key]                              Print tracked environment variables
   [k]ill <name>... [--force]                               Kill session and all attached clients
   [hi]story <name> [--vt|--html] [--screen|scrollback]     Output session scrollback
-  history --latest [--wait [N] [--timeout X]] <name>       Incremental history
+  history --latest [--wait-lines [N] [--timeout X]] <name>       Incremental history
   [w]ait <name>...                                         Wait for session tasks to complete
   [t]ail <name>...                                         Follow session output
   [c]ompletions <shell>                                    Shell completions (bash, zsh, fish, nu, yash)

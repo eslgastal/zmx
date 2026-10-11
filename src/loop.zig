@@ -551,10 +551,12 @@ fn daemonLoop(daemon: *Daemon, gpa: std.mem.Allocator, io: std.Io, server_sock_f
         const after_ms = std.Io.Timestamp.now(io, .awake).toMilliseconds();
         for (daemon.clients.items) |client| {
             if (client.latest_wait) |pending| {
-                if (daemon.latest_count >= pending.minimum) {
-                    try daemon.replyLatest(gpa, client, false, pending.minimum);
+                if (term.screens.active_key == .alternate) {
+                    try daemon.replyLatest(gpa, client, .alternate, pending.minimum);
+                } else if (daemon.latest_count >= pending.minimum) {
+                    try daemon.replyLatest(gpa, client, .normal, pending.minimum);
                 } else if (after_ms >= pending.deadline_ms) {
-                    try daemon.replyLatest(gpa, client, true, pending.minimum);
+                    try daemon.replyLatest(gpa, client, .timeout, pending.minimum);
                 }
             }
         }
@@ -1215,18 +1217,30 @@ pub const Daemon = struct {
         self.latest_count += 1;
     }
 
-    fn replyLatest(self: *Daemon, gpa: std.mem.Allocator, client: *Client, timed_out: bool, minimum: u32) !void {
+    const LatestOutcome = enum { normal, timeout, alternate };
+
+    fn replyLatest(self: *Daemon, gpa: std.mem.Allocator, client: *Client, outcome: LatestOutcome, minimum: u32) !void {
         var output: std.Io.Writer.Allocating = .init(gpa);
         defer output.deinit();
         const w = &output.writer;
+        const quoted_name: ?[]u8 = if (outcome == .alternate and util.shellNeedsQuoting(self.session_name))
+            try util.shellQuote(gpa, self.session_name)
+        else
+            null;
+        defer if (quoted_name) |name| gpa.free(name);
+        const history_name = quoted_name orelse self.session_name;
         if (self.latest_count == 0) {
-            if (timed_out) {
-                try w.print("[Latest history: no new lines; timed out waiting for {d}.]", .{minimum});
-            } else try w.writeAll("[Latest history: no new lines.]");
+            switch (outcome) {
+                .normal => try w.writeAll("[Latest history: no new lines.]"),
+                .timeout => try w.print("[Latest history: no new lines; timed out waiting for {d}.]", .{minimum}),
+                .alternate => try w.print("[Latest history: alternate screen active; output not tracked. Use zmx history {s} for a non-incremental snapshot.]", .{history_name}),
+            }
         } else {
-            if (timed_out) {
-                try w.print("[Latest history: {d} new lines; timed out waiting for {d}.]", .{ self.latest_count, minimum });
-            } else try w.print("[Latest history: {d} new lines.]", .{self.latest_count});
+            switch (outcome) {
+                .normal => try w.print("[Latest history: {d} new lines.]", .{self.latest_count}),
+                .timeout => try w.print("[Latest history: {d} new lines; timed out waiting for {d}.]", .{ self.latest_count, minimum }),
+                .alternate => try w.print("[Latest history: {d} new lines; alternate screen active; output not tracked. Use zmx history {s} for a non-incremental snapshot.]", .{ self.latest_count, history_name }),
+            }
             try w.print("\n\n{s}", .{self.latest_lines.items});
         }
         if (self.latest_dropped > 0) try w.print("\n[Latest history: {d} lines dropped (queue limit or oversized line).]", .{self.latest_dropped});
@@ -1243,6 +1257,10 @@ pub const Daemon = struct {
         const request = std.mem.bytesToValue(ipc.LatestRequest, payload);
         try ipc.appendMessage(gpa, &client.write_buf, .LatestReady, "");
         client.has_pending_output = true;
+        if (term.screens.active_key == .alternate) {
+            try self.replyLatest(gpa, client, .alternate, request.wait_lines);
+            return;
+        }
         if (!self.latest_initialized) {
             self.setPwd(term);
             const snapshot = util.serializeTerminal(gpa, term, .plain);
@@ -1259,7 +1277,7 @@ pub const Daemon = struct {
         }
         if (request.wait_lines > self.latest_count) {
             client.latest_wait = .{ .minimum = request.wait_lines, .deadline_ms = std.Io.Timestamp.now(io, .awake).toMilliseconds() + request.timeout_ms };
-        } else try self.replyLatest(gpa, client, false, request.wait_lines);
+        } else try self.replyLatest(gpa, client, .normal, request.wait_lines);
     }
 
     pub fn handleCapture(
@@ -1514,9 +1532,35 @@ test "latest journal renders completed logical lines and consumes them" {
     var client = Client{ .alloc = alloc, .socket_fd = -1, .read_buf = try ipc.SocketBuffer.init(alloc), .write_buf = .empty };
     defer client.read_buf.deinit();
     defer client.write_buf.deinit(alloc);
-    try daemon.replyLatest(alloc, &client, false, 1);
+    try daemon.replyLatest(alloc, &client, .normal, 1);
     try std.testing.expectEqual(@as(usize, 0), daemon.latest_count);
     try std.testing.expect(std.mem.indexOf(u8, client.write_buf.items, "[Latest history: 1 new lines.]\n\nfoX\n") != null);
+}
+
+test "latest notice in alternate screen defers bootstrap and shell-quotes session" {
+    const alloc = std.testing.allocator;
+    const cfg = Cfg{ .socket_dir = "", .log_dir = "" };
+    var term = try initTerminal(alloc, std.testing.io, .{ .cols = 80, .rows = 24 }, &cfg);
+    defer term.deinit(alloc);
+    var stream = term.vtStream();
+    defer stream.deinit();
+    var daemon = testDaemon();
+    daemon.session_name = "with space";
+    defer daemon.latest_lines.deinit(alloc);
+    var client = Client{ .alloc = alloc, .socket_fd = -1, .read_buf = try ipc.SocketBuffer.init(alloc), .write_buf = .empty };
+    defer client.read_buf.deinit();
+    defer client.write_buf.deinit(alloc);
+    stream.nextSlice("\x1b[?1049hhidden\r\n");
+    const request = ipc.LatestRequest{ .wait_lines = 5, .timeout_ms = 1000 };
+    try daemon.handleLatest(alloc, std.testing.io, &client, &term, std.mem.asBytes(&request));
+    try std.testing.expect(!daemon.latest_initialized);
+    try std.testing.expect(client.latest_wait == null);
+    try std.testing.expect(std.mem.indexOf(u8, client.write_buf.items, "Use zmx history 'with space' for a non-incremental snapshot.") != null);
+    stream.nextSlice("\x1b[?1049l");
+    client.write_buf.clearRetainingCapacity();
+    try daemon.handleLatest(alloc, std.testing.io, &client, &term, std.mem.asBytes(&request));
+    try std.testing.expect(daemon.latest_initialized);
+    try std.testing.expect(std.mem.indexOf(u8, client.write_buf.items, "[Latest history initialized:") != null);
 }
 
 test "latest queue drops oldest completed lines at its byte limit and reports loss" {
@@ -1542,7 +1586,7 @@ test "latest queue drops oldest completed lines at its byte limit and reports lo
     var client = Client{ .alloc = alloc, .socket_fd = -1, .read_buf = try ipc.SocketBuffer.init(alloc), .write_buf = .empty };
     defer client.read_buf.deinit();
     defer client.write_buf.deinit(alloc);
-    try daemon.replyLatest(alloc, &client, false, 0);
+    try daemon.replyLatest(alloc, &client, .normal, 0);
     try std.testing.expect(std.mem.indexOf(u8, client.write_buf.items, "1 lines dropped") != null);
 }
 
