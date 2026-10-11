@@ -911,6 +911,65 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     };
 }
 
+/// Extract the logical row at the cursor before a line feed. The same VT
+/// parser and plain formatter as history handle colors, CR, BS and Unicode.
+/// Bound the backward walk for pathological unbroken soft wraps.
+pub fn completedTerminalLine(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) ![]u8 {
+    const pages = &term.screens.active.pages;
+    const cursor = term.screens.active.cursor;
+    const end = pages.pin(.{ .active = .{ .x = @intCast(pages.cols - 1), .y = cursor.y } }) orelse return alloc.dupe(u8, "\n");
+    var start = end;
+    start.x = 0;
+    var steps: usize = 0;
+    while (steps < 256 and start.rowAndCell().row.wrap_continuation) : (steps += 1) {
+        start = start.up(1) orelse return error.LineTooLong;
+        start.x = 0;
+    }
+    if (start.rowAndCell().row.wrap_continuation) return error.LineTooLong;
+    var builder: std.Io.Writer.Allocating = .init(alloc);
+    defer builder.deinit();
+    var opts: ghostty_vt.formatter.Options = .plain;
+    opts.unwrap = true;
+    var formatter = ghostty_vt.formatter.TerminalFormatter.init(term, opts);
+    formatter.content = .{ .selection = ghostty_vt.Selection.init(start, end, false) };
+    formatter.extra = .none;
+    try formatter.format(&builder.writer);
+    const text = std.mem.trimEnd(u8, builder.writer.buffered(), "\n");
+    return std.fmt.allocPrint(alloc, "{s}\n", .{text});
+}
+
+/// Bootstrap uses exactly the ordinary plain history formatter, without
+/// retaining the full serialization after this first request.
+pub fn lastHistoryLines(text: []const u8, max_lines: usize) []const u8 {
+    var end = text.len;
+    while (end > 0 and text[end - 1] == '\n') : (end -= 1) {}
+    var start = end;
+    var count: usize = 0;
+    while (start > 0) {
+        start -= 1;
+        if (text[start] == '\n') {
+            count += 1;
+            if (count == max_lines) {
+                start += 1;
+                break;
+            }
+        }
+    }
+    return text[start..end];
+}
+
+test "lastHistoryLines keeps exactly 20 and handles empty input" {
+    try std.testing.expectEqualStrings("", lastHistoryLines("", 20));
+    try std.testing.expectEqualStrings("one\ntwo", lastHistoryLines("one\ntwo\n", 20));
+    var b: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer b.deinit();
+    for (1..26) |i| try b.writer.print("line {d}\n", .{i});
+    const last = lastHistoryLines(b.writer.buffered(), 20);
+    try std.testing.expect(std.mem.startsWith(u8, last, "line 6\n"));
+    try std.testing.expect(std.mem.endsWith(u8, last, "line 25"));
+    try std.testing.expectEqual(@as(usize, 19), std.mem.count(u8, last, "\n"));
+}
+
 pub const HistoryFormat = enum(u8) {
     plain = 0,
     vt = 1,
