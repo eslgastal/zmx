@@ -29,6 +29,10 @@ pub const Tag = enum(u8) {
     /// Scoped history: the active screen plus a bounded number of
     /// preceding scrollback rows. Request payload is `Capture`.
     Capture = 22,
+    /// Request: LatestRequest; reply: UTF-8 notice and completed lines.
+    Latest = 23,
+    /// Immediate response to a Latest request, before an optional wait.
+    LatestReady = 24,
     // Non-exhaustive: this enum comes off the wire via bytesToValue and
     // @enumFromInt, so out-of-range values are representable
     // rather than UB. Switches must handle `_` (unknown tag).
@@ -63,6 +67,12 @@ pub const Resize = packed struct {
 pub const Capture = packed struct {
     format: u8,
     rows: u32,
+};
+
+/// wait_lines=0 means do not wait. timeout_ms is ignored in that case.
+pub const LatestRequest = packed struct {
+    wait_lines: u32,
+    timeout_ms: u32,
 };
 
 pub fn getTerminalSize(fd: i32) Resize {
@@ -349,14 +359,15 @@ test "Info wire size is frozen" {
 
 test "Tag wire values are frozen" {
     inline for (.{
-        .{ Tag.Input, 0 },     .{ Tag.Output, 1 },        .{ Tag.Resize, 2 },
-        .{ Tag.Detach, 3 },    .{ Tag.DetachAll, 4 },     .{ Tag.Kill, 5 },
-        .{ Tag.Info, 6 },      .{ Tag.Init, 7 },          .{ Tag.History, 8 },
-        .{ Tag.Run, 9 },       .{ Tag.Ack, 10 },          .{ Tag.Switch, 11 },
-        .{ Tag.Write, 12 },    .{ Tag.TaskComplete, 13 }, .{ Tag.LabelGet, 14 },
-        .{ Tag.LabelSet, 15 }, .{ Tag.LabelClear, 16 },   .{ Tag.LabelData, 17 },
-        .{ Tag.Send, 18 },     .{ Tag.EnvGet, 19 },       .{ Tag.EnvSet, 20 },
-        .{ Tag.EnvData, 21 },  .{ Tag.Capture, 22 },
+        .{ Tag.Input, 0 },        .{ Tag.Output, 1 },        .{ Tag.Resize, 2 },
+        .{ Tag.Detach, 3 },       .{ Tag.DetachAll, 4 },     .{ Tag.Kill, 5 },
+        .{ Tag.Info, 6 },         .{ Tag.Init, 7 },          .{ Tag.History, 8 },
+        .{ Tag.Run, 9 },          .{ Tag.Ack, 10 },          .{ Tag.Switch, 11 },
+        .{ Tag.Write, 12 },       .{ Tag.TaskComplete, 13 }, .{ Tag.LabelGet, 14 },
+        .{ Tag.LabelSet, 15 },    .{ Tag.LabelClear, 16 },   .{ Tag.LabelData, 17 },
+        .{ Tag.Send, 18 },        .{ Tag.EnvGet, 19 },       .{ Tag.EnvSet, 20 },
+        .{ Tag.EnvData, 21 },     .{ Tag.Capture, 22 },      .{ Tag.Latest, 23 },
+        .{ Tag.LatestReady, 24 },
     }) |p| try std.testing.expectEqual(@as(u8, p[1]), @intFromEnum(p[0]));
 }
 

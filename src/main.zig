@@ -129,9 +129,39 @@ pub fn main(init: std.process.Init) !void {
         var session_name: ?[]const u8 = null;
         var format: util.HistoryFormat = .plain;
         var scrollback_rows: ?u32 = null;
-        while (args.next()) |arg| {
+        var latest = false;
+        var wait_lines: ?u32 = null;
+        var timeout_seconds: u32 = 5;
+        var has_timeout = false;
+        var pending_arg: ?[]const u8 = null;
+        while (true) {
+            const arg = pending_arg orelse args.next() orelse break;
+            pending_arg = null;
             if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
                 return help(io);
+            } else if (std.mem.eql(u8, arg, "--latest")) {
+                latest = true;
+            } else if (std.mem.eql(u8, arg, "--wait-lines")) {
+                wait_lines = 1;
+                // Only consume a positive integer. A non-number is the session.
+                // A numeric zero or overflow is rejected rather than a session.
+                const next = args.next() orelse break;
+                if (next.len > 0 and std.ascii.isDigit(next[0])) {
+                    const n = std.fmt.parseInt(u32, next, 10) catch return printError(io, "invalid --wait-lines line count: {s}", .{next});
+                    if (n == 0) return printError(io, "--wait-lines requires N >= 1", .{});
+                    wait_lines = n;
+                } else if (std.mem.startsWith(u8, next, "--")) {
+                    pending_arg = next;
+                } else if (std.mem.startsWith(u8, next, "-")) {
+                    return printError(io, "invalid --wait-lines line count: {s}", .{next});
+                } else if (session_name == null) {
+                    session_name = next;
+                } else return printError(io, "unexpected argument: {s}", .{next});
+            } else if (std.mem.eql(u8, arg, "--timeout")) {
+                has_timeout = true;
+                const value = args.next() orelse return printError(io, "--timeout requires seconds", .{});
+                timeout_seconds = std.fmt.parseInt(u32, value, 10) catch return printError(io, "invalid --timeout seconds: {s}", .{value});
+                if (timeout_seconds == 0 or timeout_seconds > 3600) return printError(io, "--timeout must be between 1 and 3600 seconds", .{});
             } else if (std.mem.eql(u8, arg, "--vt")) {
                 format = .vt;
             } else if (std.mem.eql(u8, arg, "--html")) {
@@ -143,16 +173,22 @@ pub fn main(init: std.process.Init) !void {
                 if (scrollback_rows != null) return printError(io, "--screen and --scrollback may only be specified once", .{});
                 const count = args.next() orelse return printError(io, "--scrollback requires a row count", .{});
                 scrollback_rows = std.fmt.parseInt(u32, count, 10) catch return printError(io, "invalid scrollback row count: {s}", .{count});
+            } else if (std.mem.startsWith(u8, arg, "-")) {
+                return printError(io, "unknown history option: {s}", .{arg});
             } else if (session_name == null) {
                 session_name = arg;
-            }
+            } else return printError(io, "unexpected argument: {s}", .{arg});
         }
+        if (!latest and wait_lines != null) return printError(io, "--wait-lines requires --latest", .{});
+        if (has_timeout and (wait_lines == null or !latest)) return printError(io, "--timeout requires --latest --wait-lines", .{});
+        if (latest and (format != .plain or scrollback_rows != null)) return printError(io, "--latest is incompatible with --vt, --html, --screen and --scrollback", .{});
         const sesh_env = socket.getSeshNameFromEnv();
         const raw_name = session_name orelse (if (sesh_env.len > 0) sesh_env else {
             return printError(io, "session name required (or run inside a zmx session)", .{});
         });
         const sesh = try socket.getSeshName(gpa, raw_name);
         defer gpa.free(sesh);
+        if (latest) return latestHistory(gpa, io, &cfg, sesh, wait_lines orelse 0, timeout_seconds);
         return history(gpa, io, &cfg, sesh, format, scrollback_rows);
     } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
         var attach_args: std.ArrayList([]const u8) = .empty;
@@ -530,6 +566,7 @@ fn help(io: std.Io) !void {
         \\  print-env [-s] <name> [key]                                Print tracked environment variables
         \\  [k]ill <name>... [--force]                                 Kill session and all attached clients
         \\  [hi]story <name> [--vt|--html] [--screen|--scrollback]     Output session scrollback
+        \\  history --latest [--wait-lines [N] [--timeout X]] <name>  Incremental plain history
         \\  [w]ait <name>...                                           Wait for session tasks to complete
         \\  [t]ail <name>...                                           Follow session output
         \\  [c]ompletions <shell>                                      Shell completions (bash, zsh, fish, nu, yash)
@@ -556,6 +593,14 @@ fn help(io: std.Io) !void {
         \\  --screen outputs only the active screen, and --scrollback N adds up
         \\  to N rows of scrollback above it, so pollers can skip formatting
         \\  history they would discard. Both work with --vt and --html.
+        \\
+        \\  --latest uses one session-wide cursor (intended for one consumer).
+        \\  First call returns up to 20 existing lines; later calls return only
+        \\  newly completed primary-screen lines. Alternate-screen output is
+        \\  not tracked. While alternate screen is active, --latest returns
+        \\  a notice suggesting plain history for a non-incremental snapshot.
+        \\  --wait-lines [N] waits for N lines (default 1) and --timeout X
+        \\  limits the wait to X seconds (default 5).
         \\
         \\  Examples:
         \\    zmx history <session> | tail -100
@@ -1449,6 +1494,40 @@ fn fetchHistory(
     }
 
     return error.NoHistoryResponse;
+}
+
+fn latestHistory(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, minimum: u32, seconds: u32) !void {
+    const path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch return printError(io, "invalid session name", .{});
+    defer alloc.free(path);
+    const fd = ipc.connectSession(path) catch return printError(io, "session \"{s}\" does not exist or is unresponsive", .{session_name});
+    defer lib_posix.close(fd);
+    const request = ipc.LatestRequest{ .wait_lines = minimum, .timeout_ms = seconds * 1000 };
+    try ipc.send(fd, .Latest, std.mem.asBytes(&request));
+    // Old daemons ignore unknown tags but still answer Info in order.
+    try ipc.send(fd, .Info, "");
+    var sb = try ipc.SocketBuffer.init(alloc);
+    defer sb.deinit();
+    var ready = false;
+    const deadline = std.Io.Timestamp.now(io, .awake).toMilliseconds() + @as(i64, seconds) * 1000 + 5000;
+    while (true) {
+        const remaining = deadline - std.Io.Timestamp.now(io, .awake).toMilliseconds();
+        if (remaining <= 0) return printError(io, "timeout waiting for --latest response", .{});
+        var fds = [_]lib_posix.pollfd{.{ .fd = fd, .events = lib_posix.POLL.IN, .revents = 0 }};
+        if ((try lib_posix.poll(&fds, @intCast(@min(remaining, std.math.maxInt(i32))))) == 0) continue;
+        const n = sb.read(fd) catch return printError(io, "session disconnected during --latest", .{});
+        if (n == 0) return printError(io, "session disconnected during --latest", .{});
+        while (sb.next()) |msg| {
+            if (msg.header.tag == .LatestReady) ready = true;
+            if (msg.header.tag == .Info and !ready) return printError(io, "session \"{s}\" does not support --latest (daemon too old?)", .{session_name});
+            if (msg.header.tag == .Latest) {
+                var offset: usize = 0;
+                while (offset < msg.payload.len) {
+                    offset += lib_posix.write(lib_posix.STDOUT_FILENO, msg.payload[offset..]) catch return;
+                }
+                return;
+            }
+        }
+    }
 }
 
 fn history(alloc: std.mem.Allocator, io: std.Io, cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat, scrollback_rows: ?u32) !void {
