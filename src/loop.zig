@@ -1004,9 +1004,7 @@ pub const Daemon = struct {
 
         client.is_terminal = true;
 
-        if (self.leader_client_fd == null) {
-            try self.setLeader(gpa, client);
-        }
+        try self.setLeader(gpa, client);
         const is_leader = self.leader_client_fd == client.socket_fd;
         const resize = std.mem.bytesToValue(ipc.Resize, payload);
 
@@ -1666,6 +1664,77 @@ test "hasTerminalClient follows attach, detach and detach-all" {
     daemon.handleDetachAll(alloc);
     try std.testing.expect(!daemon.hasTerminalClient());
     try std.testing.expectEqual(@as(?i32, null), daemon.leader_client_fd);
+}
+
+test "interactive attach and qualifying input alternate leadership without mouse or service clients" {
+    const alloc = std.testing.allocator;
+    const cfg = Cfg{ .socket_dir = "", .log_dir = "" };
+    var term = try initTerminal(alloc, std.testing.io, .{ .cols = 80, .rows = 24 }, &cfg);
+    defer term.deinit(alloc);
+    var daemon = testDaemon();
+    defer daemon.clients.deinit(alloc);
+    defer daemon.pty_write_buf.deinit(alloc);
+
+    var a = Client{ .alloc = alloc, .socket_fd = 101, .read_buf = try ipc.SocketBuffer.init(alloc), .write_buf = .empty };
+    defer a.read_buf.deinit();
+    defer a.write_buf.deinit(alloc);
+    var b = Client{ .alloc = alloc, .socket_fd = 102, .read_buf = try ipc.SocketBuffer.init(alloc), .write_buf = .empty };
+    defer b.read_buf.deinit();
+    defer b.write_buf.deinit(alloc);
+    var service = Client{ .alloc = alloc, .socket_fd = 103, .read_buf = try ipc.SocketBuffer.init(alloc), .write_buf = .empty };
+    defer service.read_buf.deinit();
+    defer service.write_buf.deinit(alloc);
+
+    try daemon.clients.appendSlice(alloc, &.{ &a, &b });
+    try std.testing.expectEqual(@as(?i32, null), daemon.leader_client_fd);
+    const a_size = ipc.Resize{ .cols = 60, .rows = 20 };
+    const b_size = ipc.Resize{ .cols = 100, .rows = 30 };
+    try daemon.handleInit(alloc, &a, -1, &term, std.mem.asBytes(&a_size));
+    try std.testing.expect(a.is_terminal);
+    try std.testing.expectEqual(@as(?i32, a.socket_fd), daemon.leader_client_fd);
+    try std.testing.expectEqual(@as(@TypeOf(term.cols), 60), term.cols);
+    try std.testing.expectEqual(ipc.Tag.Resize, std.mem.bytesToValue(ipc.Header, a.write_buf.items[0..@sizeOf(ipc.Header)]).tag);
+    a.write_buf.clearRetainingCapacity();
+
+    try daemon.handleInit(alloc, &b, -1, &term, std.mem.asBytes(&b_size));
+    try std.testing.expect(b.is_terminal);
+    try std.testing.expectEqual(@as(?i32, b.socket_fd), daemon.leader_client_fd);
+    try std.testing.expectEqual(@as(@TypeOf(term.cols), 100), term.cols);
+    try std.testing.expectEqual(@as(@TypeOf(term.rows), 30), term.rows);
+    try std.testing.expectEqual(ipc.Tag.Resize, std.mem.bytesToValue(ipc.Header, b.write_buf.items[0..@sizeOf(ipc.Header)]).tag);
+    b.write_buf.clearRetainingCapacity();
+
+    // Connecting a send/run/tail/history client does not take over.
+    try daemon.clients.append(alloc, &service);
+    try std.testing.expect(!service.is_terminal);
+    try std.testing.expectEqual(@as(?i32, b.socket_fd), daemon.leader_client_fd);
+    // Neither service input nor mouse-wheel input from A takes over.
+    daemon.handleSend(alloc, "sent");
+    try std.testing.expectEqual(@as(?i32, b.socket_fd), daemon.leader_client_fd);
+    try daemon.handleInput(alloc, &a, "\x1b[<64;1;1M");
+    try std.testing.expectEqual(@as(?i32, b.socket_fd), daemon.leader_client_fd);
+    try std.testing.expectEqual(@as(usize, 0), a.write_buf.items.len);
+    try std.testing.expectEqualStrings("sent", daemon.pty_write_buf.items);
+
+    try daemon.handleInput(alloc, &a, "a");
+    try std.testing.expectEqual(@as(?i32, a.socket_fd), daemon.leader_client_fd);
+    try std.testing.expectEqualStrings("senta", daemon.pty_write_buf.items);
+    try std.testing.expectEqual(ipc.Tag.Resize, std.mem.bytesToValue(ipc.Header, a.write_buf.items[0..@sizeOf(ipc.Header)]).tag);
+    a.write_buf.clearRetainingCapacity();
+    // The new leader alone has resize authority after taking over by keyboard.
+    try daemon.handleResize(alloc, &b, -1, &term, std.mem.asBytes(&b_size));
+    try std.testing.expectEqual(@as(@TypeOf(term.cols), 100), term.cols);
+    try daemon.handleResize(alloc, &a, -1, &term, std.mem.asBytes(&a_size));
+    try std.testing.expectEqual(@as(@TypeOf(term.cols), 60), term.cols);
+
+    try daemon.handleInput(alloc, &b, "b");
+    try std.testing.expectEqual(@as(?i32, b.socket_fd), daemon.leader_client_fd);
+    try std.testing.expectEqualStrings("sentab", daemon.pty_write_buf.items);
+    b.write_buf.clearRetainingCapacity();
+    try daemon.handleInit(alloc, &a, -1, &term, std.mem.asBytes(&a_size));
+    try std.testing.expectEqual(@as(?i32, a.socket_fd), daemon.leader_client_fd);
+    try std.testing.expectEqual(ipc.Tag.Resize, std.mem.bytesToValue(ipc.Header, a.write_buf.items[0..@sizeOf(ipc.Header)]).tag);
+    try std.testing.expect(!service.is_terminal);
 }
 
 test "send queues PTY input without changing leader" {
